@@ -1,64 +1,91 @@
-import requests, json, os
+import requests
+import json
+import os
+import hashlib
 
-url = os.environ.get('URL')
+url = os.environ.get('URL', 'https://t8.wj-kc.com').rstrip('/')
 EMAIL = os.environ.get('EMAIL')
 PASSWD = os.environ.get('PASSWD')
-SCKEY = os.environ.get('SCKEY')
+SCKEY = os.environ.get('SCKEY', '')
 
-login_url = url + '/api/v1/passport/auth/login'
-check_url = url + '/api/v1/user/checkin'
+def md5(text):
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
 
-# 前端域名（与浏览器请求保持一致）
-frontend_url = 'https://pin.dianping.men'
+def decode_response(res_text):
+    """解析这个机场特殊的返回格式"""
+    try:
+        data = json.loads(res_text)
+        if 'data' in data and isinstance(data['data'], str):
+            import base64
+            return json.loads(base64.b64decode(data['data']).decode())
+        return data
+    except Exception as e:
+        print(f"解析响应失败: {e}")
+        print(f"原始响应: {res_text}")
+        return None
 
-def sign(order, user, pwd):
-    session = requests.session()
-    header = {
-        'origin': frontend_url,
-        'referer': frontend_url + '/',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        'accept': 'application/json, text/plain, */*',
-        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+def sign():
+    session = requests.Session()
+    headers = {
+        'Origin': url,
+        'Referer': f'{url}/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*',
     }
-    data = {
-        'email': user,
-        'password': pwd
+
+    # 1. 登录
+    print(f'=== 开始登录 ===')
+    print(f'账号：{EMAIL}')
+    login_data = {
+        'email': EMAIL,
+        'password': md5(PASSWD)
     }
     try:
-        print(f'===账号{order}进行登录...===')
-        print(f'账号：{user}')
-        res = session.post(url=login_url, headers=header, data=data).text
-        print(res)
-        response = json.loads(res)
-        print(response['message'])
+        res = session.post(f'{url}/api/user/login', headers=headers, json=login_data, timeout=15)
+        print(f'登录原始返回: {res.text}')
+        result = decode_response(res.text)
+        print(f'登录解析结果: {result}')
 
-        # 使用 auth_data (JWT) 作为鉴权token，无需Bearer前缀
-        auth_data = response['data']['auth_data']
-        header['authorization'] = auth_data
+        if not result or result.get('code') != 0:
+            msg = result.get('msg', '未知错误') if result else '解析失败'
+            print(f'登录失败: {msg}')
+            content = f'登录失败: {msg}'
+        else:
+            print('登录成功')
+            # 2. 签到
+            print('=== 开始签到 ===')
+            res2 = session.post(f'{url}/api/user/sign_use', headers=headers, json={}, timeout=15)
+            print(f'签到原始返回: {res2.text}')
+            result2 = decode_response(res2.text)
+            print(f'签到解析结果: {result2}')
 
-        # 进行签到
-        res2 = session.post(url=check_url, headers=header).text
-        print(res2)
-        result = json.loads(res2)
-        print(result['message'])
-        content = result['message']
+            if result2 and result2.get('code') == 0:
+                add_traffic = result2.get('data', {}).get('addTraffic', '未知')
+                content = f'签到成功！获得流量: {add_traffic}'
+                print(content)
+            else:
+                msg = result2.get('msg', '未知错误') if result2 else '解析失败'
+                content = f'签到失败: {msg}'
+                print(content)
 
-        if SCKEY:
-            push_url = 'https://sctapi.ftqq.com/{}.send?title=机场签到&desp={}'.format(SCKEY, content)
-            requests.post(url=push_url)
-            print('推送成功')
     except Exception as ex:
-        content = '签到失败'
+        content = f'签到异常: {str(ex)}'
         print(content)
-        print("出现如下异常%s" % ex)
-        if SCKEY:
-            push_url = 'https://sctapi.ftqq.com/{}.send?title=机场签到&desp={}'.format(SCKEY, content)
-            requests.post(url=push_url)
+
+    # 推送
+    if SCKEY:
+        try:
+            push_url = f'https://sctapi.ftqq.com/{SCKEY}.send'
+            requests.post(push_url, data={'title': '机场签到', 'desp': content}, timeout=10)
             print('推送成功')
-    print(f'===账号{order}签到结束===\n')
+        except:
+            print('推送失败')
+
+    print('=== 签到结束 ===')
 
 if __name__ == '__main__':
     if not EMAIL or not PASSWD:
-        print('配置文件格式错误')
-        exit()
-    sign(0, EMAIL, PASSWD)
+        print('请配置 EMAIL 和 PASSWD')
+        exit(1)
+    sign()
